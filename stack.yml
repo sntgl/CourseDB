@@ -1,0 +1,30 @@
+version: '3.1'
+
+networks:
+  local:
+    driver: bridge
+
+services:
+
+  db:
+    image: postgres
+    restart: always
+    build:
+      dockerfile: Dockerfile
+      context: db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    networks:
+      - local
+    ports:
+      - "5432:5432" #выключить для прода, чтобы никто не смог подключаться извне
+
+  go:
+    build:
+      dockerfile: Dockerfile
+      context: src
+    networks:
+      - local
+    ports:
+      - "3000:3000"
