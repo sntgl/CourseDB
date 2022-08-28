@@ -100,10 +100,61 @@ func main() {
 	app.Post("/revision/category/edit", func(c *fiber.Ctx) error {
 		return revisionEditCategoryHandler(c)
 	})
+	app.Post("/revision/category/remove", func(c *fiber.Ctx) error {
+		return revisionRemoveCategoryHandler(c)
+	})
 	err := app.Listen(":3000")
 	if err != nil {
 		return
 	}
+}
+
+func revisionRemoveCategoryHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		RevisionId int `json:"revision_id"`
+		CategoryId int `json:"category_id"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id' and 'category_id' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	var rows *sql.Rows
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+	rows, err = editorConnection.Query("SELECT cw.remove_category_edition($1, $2)",
+		body.RevisionId, body.CategoryId)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer closeRows(rows)
+	if !rows.Next() {
+		return databaseError(err)
+	}
+
+	var removed bool
+	err = rows.Scan(&removed)
+	if err != nil {
+		return databaseError(err)
+	}
+
+	if !removed {
+		return fiber.NewError(400, "Category not exists")
+	}
+
+	return ctx.SendStatus(200)
 }
 
 func revisionEditCategoryHandler(ctx *fiber.Ctx) error {
