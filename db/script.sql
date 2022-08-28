@@ -55,7 +55,8 @@ CREATE TABLE cw.CardT
     category_id INT,
     card_id     INT,
     new_text    varchar(300),
-    FOREIGN KEY (revision_id) REFERENCES cw.Revision (id)
+    FOREIGN KEY (revision_id) REFERENCES cw.Revision (id),
+    FOREIGN KEY (category_id) REFERENCES cw.CategoryT (category_id)
 );
 
 
@@ -228,6 +229,7 @@ begin
     if (not exists(select * from cw.categoryt where revision_id = revision_id_in and category_id = category_id_in)) then
         return false;
     end if;
+    delete from cw.cardt where revision_id = revision_id_in and category_id = category_id_in;
     delete from cw.categoryt where revision_id = revision_id_in and category_id = category_id_in;
     return true;
 END
@@ -247,16 +249,131 @@ begin
 END
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+--добавление карточки в категорию
+CREATE or replace FUNCTION cw.add_card(
+    revision_id_in int,
+    category_id_in int,
+    text_in varchar
+)
+    RETURNS int
+AS
+$$
+declare
+    res int;
+begin
+    --категории не существует
+    if (not exists(select * from cw.categoryt where category_id = category_id_in and revision_id = revision_id_in)) then
+        return -1;
+    end if;
+    --карта с таким именем уже есть в этой категории
+    if (exists(select *
+               from cw.category cat
+                        join cw.card crd on crd.category_id = cat.id
+               where cat.id = category_id_in
+                 and crd.text = text_in) or
+        exists(select *
+               from cw.categoryt cat
+                        join cw.cardt crd on crd.category_id = cat.category_id
+               where cat.category_id = category_id_in
+                 and crd.new_text = text_in)) then
+        return -2;
+    end if;
+
+    insert into cw.cardT(card_id, revision_id, category_id, new_text)
+    values (nextval('cw.card_id_seq'), revision_id_in, category_id_in, text_in)
+    returning card_id into res;
+    return res;
+END
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+--изменение карточки в категории или ее удаление из базы
+CREATE or replace FUNCTION cw.edit_card(
+    revision_id_in int,
+    category_id_in int,
+    card_id_in int,
+    text_in varchar default null
+)
+    RETURNS int
+AS
+$$
+declare
+    res int;
+begin
+    --карта изменяется в другой ревизии
+    if (exists(select *
+               from cw.cardt
+               where card_id = card_id_in
+                 and not revision_id = revision_id_in
+                 and not category_id = category_id_in)) then
+        return -1;
+    end if;
+    --категории не существует
+    if (not exists(select * from cw.categoryt where category_id = category_id_in and revision_id = revision_id_in)) then
+        return -2;
+    end if;
+
+    if (exists(select * from cw.card where id = card_id_in and category_id = category_id_in) and
+        not exists(select * from cw.cardt where card_id = card_id_in and category_id = category_id_in)) then
+        insert into cw.cardt (card_id, revision_id, category_id, new_text)
+        values (card_id_in, revision_id_in, category_id_in, text_in)
+        returning card_id into res;
+    else
+        update cw.cardT
+        set card_id     = card_id_in,
+            revision_id = revision_id_in,
+            category_id = category_id_in,
+            new_text    = text_in
+        where category_id = category_id_in
+          and revision_id = revision_id_in
+          and card_id = card_id_in
+        returning card_id into res;
+    end if;
+    return res;
+END
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+--удаление изменения категории
+CREATE or replace FUNCTION cw.remove_card_edition(
+    revision_id_in int,
+    category_id_in int,
+    card_id_in int
+) RETURNS bool AS
+$$
+begin
+    if (not exists(select *
+                   from cw.cardt
+                   where revision_id = revision_id_in
+                     and category_id = category_id_in
+                     and card_id = card_id_in)) then
+        return false;
+    end if;
+    delete from cw.cardt where revision_id = revision_id_in and category_id = category_id_in and card_id = card_id_in;
+    return true;
+END
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+--удаление ревизии
+CREATE or replace procedure cw.remove_revision(revision_id_in int)
+LANGUAGE plpgsql AS
+$$
+begin
+    DELETE FROM cw.cardt where revision_id = revision_id_in;
+    DELETE FROM cw.categoryt where revision_id = revision_id_in;
+    DELETE FROM cw.revision where id = revision_id_in;
+END
+$$
+SECURITY DEFINER;
+
 --вьюхи
 --все категории с карточками для ревизии в формате json
-create view cw.revision_categories_with_cards as
+create or replace view cw.revision_categories_with_cards as
 select id,
        category_id,
        new_name,
        new_description,
        revision_id,
        (select array_to_json(array_agg(row_to_json(cards.*))) as array_to_json
-        from (select c.id, c.card_id, c.new_text
+        from (select c.card_id, c.new_text
               from cw.cardt c
               where c.revision_id = r.revision_id
                 and c.category_id = r.category_id) cards) as cards
@@ -275,11 +392,7 @@ grant select on cw.Category, cw.Card to watcher_user;
 grant EXECUTE on function cw.v to watcher_user;
 grant EXECUTE on function cw.auth to watcher_user;
 grant EXECUTE on function cw.session to watcher_user;
---
--- grant EXECUTE on function cw.auth to watcher_user;
--- grant EXECUTE on function cw.session to watcher_user;
--- grant EXECUTE on function cw.session to watcher_user;
--- grant EXECUTE on function cw.v to watcher_user;
+
 
 --пользователь editor
 -- DROP OWNED BY editor_user;
@@ -303,7 +416,6 @@ grant EXECUTE on function cw.remove_category_edition to editor_user;
 grant EXECUTE on function cw.owns to editor_user;
 
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cw TO editor_user;
--- grant EXECUTE on function cw.auth to editor_user;
 
 
 --стартовый набор данных
@@ -323,7 +435,7 @@ values (2, 'Автобус'),
        (2, 'Аэропорт');
 
 
-select cw.register('Aleksandr Tagilov'::varchar, 'amtagilov2'::varchar, 'MySimplePassword123'::varchar, 1::smallint);
+select cw.register('Aleksandr Tagilov'::varchar, 'amtagilov'::varchar, 'MySimplePassword123'::varchar, 1::smallint);
 
 --примеры использования
 select a.token, a.access_level

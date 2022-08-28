@@ -94,6 +94,9 @@ func main() {
 	app.Post("/revision/create", func(c *fiber.Ctx) error {
 		return revisionCreateHandler(c)
 	})
+	app.Post("/revision/remove", func(c *fiber.Ctx) error {
+		return revisionRemoveHandler(c)
+	})
 	app.Post("/revision/category/new", func(c *fiber.Ctx) error {
 		return revisionNewCategoryHandler(c)
 	})
@@ -103,10 +106,213 @@ func main() {
 	app.Post("/revision/category/remove", func(c *fiber.Ctx) error {
 		return revisionRemoveCategoryHandler(c)
 	})
+	app.Post("/revision/card/new", func(c *fiber.Ctx) error {
+		return revisionNewCardHandler(c)
+	})
+	app.Post("/revision/card/edit", func(c *fiber.Ctx) error {
+		return revisionEditCardHandler(c)
+	})
+	app.Post("/revision/card/remove", func(c *fiber.Ctx) error {
+		return revisionRemoveCardHandler(c)
+	})
 	err := app.Listen(":3000")
 	if err != nil {
 		return
 	}
+}
+
+func revisionRemoveHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		RevisionId int `json:"revision_id"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+
+	_, err = editorConnection.Exec("call cw.remove_revision($1);", body.RevisionId)
+	if err != nil {
+		return databaseError(err)
+	}
+	return ctx.SendStatus(200)
+}
+
+func revisionRemoveCardHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		RevisionId int `json:"revision_id"`
+		CategoryId int `json:"category_id"`
+		CardId     int `json:"card_id"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id', 'category_id' and 'card_id' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	var rows *sql.Rows
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+	rows, err = editorConnection.Query("SELECT cw.remove_card_edition($1, $2, $3)",
+		body.RevisionId, body.CategoryId, body.CardId)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer closeRows(rows)
+	if !rows.Next() {
+		return databaseError(err)
+	}
+
+	var removed bool
+	err = rows.Scan(&removed)
+	if err != nil {
+		return databaseError(err)
+	}
+
+	if !removed {
+		return fiber.NewError(400, "Card not exists")
+	}
+
+	return ctx.SendStatus(200)
+}
+
+func revisionEditCardHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		RevisionId int    `json:"revision_id"`
+		CategoryId int    `json:"category_id"`
+		CardId     int    `json:"card_id"`
+		Text       string `json:"text"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id', 'card_id' and optional 'text' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	var rows *sql.Rows
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+
+	if body.Text == "" {
+		rows, err = editorConnection.Query("SELECT cw.edit_card($1, $2, $3)",
+			body.RevisionId, body.CategoryId, body.CardId)
+	} else {
+		rows, err = editorConnection.Query("SELECT cw.edit_card($1, $2, $3, $4)",
+			body.RevisionId, body.CategoryId, body.CardId, body.Text)
+	}
+
+	if err != nil {
+		return databaseError(err)
+	}
+	defer closeRows(rows)
+	if !rows.Next() {
+		return databaseError(err)
+	}
+
+	var id int
+	err = rows.Scan(&id)
+	if err != nil {
+		return databaseError(err)
+	}
+
+	if id == -1 {
+		return fiber.NewError(400, "Card is already edits on another revision")
+	} else if id == -2 {
+		return fiber.NewError(400, "Category not exists")
+	}
+
+	return ctx.JSON(fiber.Map{"id": id})
+}
+
+func revisionNewCardHandler(ctx *fiber.Ctx) error {
+
+	body := struct {
+		RevisionId int    `json:"revision_id"`
+		CategoryId int    `json:"category_id"`
+		Text       string `json:"text"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id', 'category_id' 'text' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	var rows *sql.Rows
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+
+	rows, err = editorConnection.Query("SELECT cw.add_card($1, $2, $3)",
+		body.RevisionId, body.CategoryId, body.Text)
+
+	if err != nil {
+		return databaseError(err)
+	}
+	defer closeRows(rows)
+	if !rows.Next() {
+		return databaseError(err)
+	}
+
+	var id int
+	err = rows.Scan(&id)
+	if err != nil {
+		return databaseError(err)
+	}
+
+	if id == -1 {
+		return fiber.NewError(400, "Category not exists")
+	} else if id == -2 {
+		return fiber.NewError(400, "Card with this name are already exists in this category")
+	}
+
+	return ctx.JSON(fiber.Map{"id": id})
+
 }
 
 func revisionRemoveCategoryHandler(ctx *fiber.Ctx) error {
@@ -218,7 +424,7 @@ func revisionEditCategoryHandler(ctx *fiber.Ctx) error {
 		return fiber.NewError(400, "Null fields for non-exist category are not allown")
 	}
 
-	return ctx.JSON(fiber.Map{"id": 3})
+	return ctx.JSON(fiber.Map{"id": id})
 }
 
 func revisionNewCategoryHandler(ctx *fiber.Ctx) error {
@@ -361,7 +567,6 @@ func revisionCategoriesListHandler(ctx *fiber.Ctx, revisionId int) error {
 			"select array_to_json("+
 			"array_agg("+
 			"json_build_object("+
-			"'id', c.id,"+
 			"'category_id', c.category_id,"+
 			"'name', c.new_name,"+
 			"'description', new_description,"+
@@ -538,6 +743,9 @@ func authHandler(ctx *fiber.Ctx) error {
 	err = rows.Scan(&authResult.Id, &authResult.Token, &authResult.AccessLevel)
 	if err != nil {
 		panic(err)
+	}
+	if authResult.Id == -1 {
+		return fiber.ErrNotFound
 	}
 	return ctx.JSON(authResult)
 }
