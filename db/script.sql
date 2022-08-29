@@ -352,9 +352,32 @@ begin
 END
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+--ревизия в формате json
+CREATE or replace FUNCTION cw.revision_json(revision_id_in int) RETURNS varchar as
+$$
+DECLARE
+    res varchar;
+begin
+    select json_build_object(
+                   'name', r.name,
+                   'created_at', r.created_at,
+                   'categories', j.list)
+    from (select array_to_json(array_agg(json_build_object(
+            'category_id', c.category_id,
+            'name', c.new_name,
+            'description', new_description,
+            'cards', c.cards))) list
+          from cw.revision_categories_with_cards c
+          where c.revision_id = revision_id_in) j
+             join cw.revision r on r.id = revision_id_in
+    into res;
+    return res;
+END
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 --удаление ревизии
 CREATE or replace procedure cw.remove_revision(revision_id_in int)
-LANGUAGE plpgsql AS
+    LANGUAGE plpgsql AS
 $$
 begin
     DELETE FROM cw.cardt where revision_id = revision_id_in;
@@ -362,7 +385,85 @@ begin
     DELETE FROM cw.revision where id = revision_id_in;
 END
 $$
-SECURITY DEFINER;
+    SECURITY DEFINER;
+
+
+--применение ревизии
+CREATE or replace procedure cw.revision_apply(revision_id_in int)
+    LANGUAGE plpgsql AS
+$$
+begin
+    --удаление всех карт для категорий из базы - с полями null
+    delete
+    from cw.card as crd
+    where crd.category_id in (select category_id
+                              from cw.categoryt
+                              where revision_id = revision_id_in
+                                and new_description is null
+                                and new_name is null);
+    --удаление всех категорий из базы - с полями null
+    delete
+    from cw.category as cat
+    where cat.id in (select category_id
+                     from cw.categoryt
+                     where revision_id = revision_id_in
+                       and new_description is null
+                       and new_name is null);
+    --удаляем карточки ревизии примененных категорий
+    delete
+    from cw.cardt
+    where category_id in (select category_id
+                          from cw.categoryt
+                          where revision_id = revision_id_in
+                            and new_description is null
+                            and new_name is null);
+    --удаляем примененные категории ревизии
+    delete
+    from cw.categoryt ct
+    where ct.revision_id = revision_id_in
+      and new_description is null
+      and new_name is null;
+
+    --добавляем недостающие данные в категории
+    update cw.categoryt ct
+    set new_description = coalesce(new_description, sq.d),
+        new_name        = coalesce(new_name, sq.d)
+    from (select id i, name n, description d from cw.category) sq
+    where revision_id = revision_id_in
+      and sq.i = ct.id;
+
+    --вставляем либо обновляем категории
+    with new_categories_cte as (select ct.category_id                              as id,
+                                       coalesce(ct.new_name, c.name)               as name,
+                                       coalesce(ct.new_description, c.description) as description
+                                from (select * from cw.categoryt where revision_id = revision_id_in) ct
+                                         left join cw.category c on ct.category_id = c.id)
+    insert
+    into cw.category as c (id, name, description)
+    select n.id, n.name, n.description
+    from new_categories_cte n
+    on conflict (id)
+        do update
+        set name = excluded.name, description = excluded.description;
+
+    --вставляем либо обновляем карточки
+    with new_cards_cte as (select ct.card_id                    as id,
+                                  coalesce(ct.new_text, c.text) as text,
+                                  ct.category_id as cid
+                           from (select * from cw.cardt where revision_id = revision_id_in) ct
+                                    left join cw.card c on ct.card_id = c.id)
+    insert
+    into cw.card as c (id, category_id, text)
+    select n.id, n.cid, n.text
+    from new_cards_cte n
+    on conflict (id)
+        do update
+        set text = excluded.text;
+
+    call cw.remove_revision(revision_id_in);
+end;
+$$
+    SECURITY DEFINER;
 
 --вьюхи
 --все категории с карточками для ревизии в формате json

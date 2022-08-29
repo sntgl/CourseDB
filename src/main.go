@@ -29,7 +29,7 @@ type Card struct {
 
 type CategoryWithCards struct {
 	Id          int    `json:"id"`
-	Name        string `json:"task"`
+	Name        string `json:"name"`
 	Description string `json:"description"`
 	Cards       []Card `json:"cards"`
 }
@@ -115,10 +115,44 @@ func main() {
 	app.Post("/revision/card/remove", func(c *fiber.Ctx) error {
 		return revisionRemoveCardHandler(c)
 	})
+	app.Get("/revision/apply", func(c *fiber.Ctx) error {
+		return revisionApplyHandler(c)
+	})
 	err := app.Listen(":3000")
 	if err != nil {
 		return
 	}
+}
+
+func revisionApplyHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		RevisionId int `json:"revision_id"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil {
+		return fiber.NewError(400, "Please, specify 'revision_id' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	if session.AccessLevel < 1 {
+		return fiber.ErrForbidden
+	} else if session.AccessLevel == 1 {
+		owns, err := owns(session.Id, body.RevisionId)
+		if err != nil {
+			return err
+		}
+		if !owns {
+			return fiber.ErrForbidden
+		}
+	}
+
+	_, err = editorConnection.Exec("call cw.revision_apply($1);", body.RevisionId)
+	if err != nil {
+		return databaseError(err)
+	}
+	return ctx.SendStatus(200)
 }
 
 func revisionRemoveHandler(ctx *fiber.Ctx) error {
@@ -558,22 +592,7 @@ func revisionCategoriesListHandler(ctx *fiber.Ctx, revisionId int) error {
 		}
 	}
 
-	rows, err = editorConnection.Query(
-		"select json_build_object("+
-			"'name', r.name, "+
-			"'created_at', r.created_at, "+
-			"'categories', j.list) "+
-			"from ("+
-			"select array_to_json("+
-			"array_agg("+
-			"json_build_object("+
-			"'category_id', c.category_id,"+
-			"'name', c.new_name,"+
-			"'description', new_description,"+
-			"'cards', c.cards))) list "+
-			"from cw.revision_categories_with_cards c "+
-			"where c.revision_id = $1) j join cw.revision r on r.id = $1;",
-		revisionId)
+	rows, err = editorConnection.Query("select * from cw.revision_json($1)", revisionId)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -710,7 +729,7 @@ func getCardsHandler(ctx *fiber.Ctx) error {
 	if len(cards) == 0 {
 		return fiber.NewError(400, "There are no cards with this category")
 	}
-	categoryWithCards := CategoryWithCards{Name: category.Name, Description: category.Description, Cards: cards}
+	categoryWithCards := CategoryWithCards{Id: body.CategoryId, Name: category.Name, Description: category.Description, Cards: cards}
 	return ctx.JSON(categoryWithCards)
 }
 
