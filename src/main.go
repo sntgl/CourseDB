@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	_ "github.com/lib/pq"
 	"log"
+	"strconv"
 )
 
 type Category struct {
@@ -55,7 +56,7 @@ var editorConnection = getConnection(ConnectionData{
 
 func getConnection(data ConnectionData) *sql.DB {
 	psqlInfo := fmt.Sprintf(
-		"host=db port=5432 user=%s password=%s dbname=postgres sslmode=disable host=db",
+		"host=db port=5432 user=%s password=%s dbname=postgres sslmode=disable",
 		data.User, data.Password)
 	conn, err := sql.Open("postgres", psqlInfo)
 	if err != nil || conn == nil {
@@ -65,10 +66,6 @@ func getConnection(data ConnectionData) *sql.DB {
 }
 
 func main() {
-	//watcherUserConn := "dbname=postgres user=watcher_user password=8B137DEC7A74463EB1836CA141BEADB3 sslmode=disable host=db" //host=db
-	//watcherUserConn := "postgresql://watcher_user:123@db:5432?sslmode=disable"
-
-	//db, err := sql.Open("postgres", watcherUserConn)
 	app := fiber.New()
 	app.Get("/check", func(c *fiber.Ctx) error {
 		return checkHandler(c)
@@ -91,7 +88,7 @@ func main() {
 	app.Get("/revision/list", func(c *fiber.Ctx) error {
 		return revisionListHandler(c)
 	})
-	app.Post("/revision/create", func(c *fiber.Ctx) error {
+	app.Post("/revision/new", func(c *fiber.Ctx) error {
 		return revisionCreateHandler(c)
 	})
 	app.Post("/revision/remove", func(c *fiber.Ctx) error {
@@ -118,10 +115,56 @@ func main() {
 	app.Get("/revision/apply", func(c *fiber.Ctx) error {
 		return revisionApplyHandler(c)
 	})
+	app.Post("/register", func(c *fiber.Ctx) error {
+		return revisionRegisterHandler(c)
+	})
 	err := app.Listen(":3000")
 	if err != nil {
 		return
 	}
+}
+
+func revisionRegisterHandler(ctx *fiber.Ctx) error {
+	body := struct {
+		Name        string `json:"name"`
+		Login       string `json:"login"`
+		Password    string `json:"password"`
+		AccessLevel int    `json:"access_level"`
+	}{}
+	if err := ctx.BodyParser(&body); err != nil || body.Name == "" || body.Login == "" || body.Password == "" {
+		return fiber.NewError(400, "Please, specify 'name', 'login', 'password', 'access_level' via body")
+	}
+
+	session, err := authorizeRequest(ctx)
+	if err != nil {
+		return err
+	}
+	if session.AccessLevel < 2 {
+		return fiber.ErrForbidden
+	}
+
+	rows, err := editorConnection.Query("select cw.register($1, $2, $3, $4::smallint);",
+		body.Name, body.Login, body.Password, body.AccessLevel)
+
+	if err != nil {
+		return databaseError(err)
+	}
+	defer closeRows(rows)
+	if !rows.Next() {
+		return databaseError(err)
+	}
+
+	var id int
+	err = rows.Scan(&id)
+	if err != nil {
+		return databaseError(err)
+	}
+
+	if id == -1 {
+		return fiber.NewError(400, "User already exists")
+	}
+
+	return ctx.SendString(strconv.Itoa(id))
 }
 
 func revisionApplyHandler(ctx *fiber.Ctx) error {
